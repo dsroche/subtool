@@ -1,0 +1,421 @@
+#!/usr/bin/env bash --norc
+
+set -e
+set -u
+shopt -s nullglob
+
+CURL=${CURL-curl} # allow to specify an alternate command for curl
+srcdir=$(dirname "$(readlink -f "$0")")
+defurlbase="http://submit.cs.usna.edu/api"
+
+# option flags: kqupfj (with arg), srh (no args)
+
+### general usage ####
+function usage {
+  # output to stderr if this is an error message
+  [[ $# -eq 1 && $1 -ne 0 ]] && exec 1>&2
+  echo "\
+Usage: $0 <command> [<args>] [<options>]
+
+Available commands:
+  p[roject]
+  f[iles] (for test cases)
+  m[anual]
+  h[elp]
+
+Options (may be more for specific commands):"
+  genopts
+  [[ $# -eq 1 ]] && exit $1
+}
+function genopts {
+  echo "\
+  -k <file>
+    Specify curl config file (may be given more than once)
+    Witn no -k, parent dirs are searched for [.]subtoolrc
+    Writing - for <file> indicates stdin.
+  -q <file>
+    Specify query file (may be given more than once), containing
+    rows with \"<name> <value>\" pairs to be added as POST query
+    parameters. In the file, <name> must not contain whitespace while
+    <value> can contain spaces (though not newlines).
+    Writing - for <file> indicates stdin.
+  -u <url>
+    Specify url base, default $defurlbase
+  -s
+    Don't run anything, just output a config file which *would*
+    run that using the \"manual\" command
+  -p <name>=<value>
+    Specify a POST value to be sent along with the query
+    Typical ones: course, apikey, project
+  -f <filename>
+    Specify a file to be sent along with the query.
+    \"-\" means to use stdin
+  -g <files>... +
+    Like -f, but combine all files until a literal +
+    into a single gzipped tarball to send
+  -j <script>
+    Run the given jq script with the returned JSON value.
+  -r
+    Return raw input, don't process through jq
+  -h
+    Same as \"help\". Can be used in conjunction with specific commands"
+}
+
+
+#### create a temp folder which is removed on exit ####
+tempdir=$(mktemp --tmpdir -d subtoolXXXXXXXX)
+chmod 700 "$tempdir"
+savetemp=false
+
+function cleanup {
+  exec 4>&-
+  if $savetemp; then
+    if find "$tempdir" -mindepth 1 -exec false {} + -quit; then
+      # directory is empty, so safe to delete
+      rmdir "$tempdir"
+    else
+      echo "WARNING: some files remain in temp directory $tempdir" >&2
+    fi
+  else
+    rm -rf "$tempdir"
+  fi
+  return 0
+}
+
+trap cleanup EXIT
+
+
+#### helper function to copy stdin to a file ####
+function copyin {
+  local fname="$tempdir/_stdin"
+  cat >"$fname"
+  echo "$fname"
+}
+
+
+#### parse command line arguments ####
+cmd=""
+args=()
+configs=()
+declare -A opts
+declare -A posts
+
+while [[ $# -gt 0 ]]; do
+  if [[ $# -ge 1 && ${1:0:1} = '-' ]]; then
+    oname=${1:1:1}
+    [[ $oname = "-" ]] && oname=${1:2:1}
+    if [[ $oname = k ]]; then
+      [[ $# -ge 2 ]] || usage 2
+      if [[ $2 = "-" ]]; then
+        configs+=( "$(copyin)" )
+      elif [[ ! -r $2 ]]; then
+        echo "ERROR: cannot read config file \"$2\"" >&2
+        exit 3
+      else
+        configs+=( "$2" )
+      fi
+      shift 2
+    elif [[ $oname = q ]]; then
+      [[ $# -ge 2 ]] || usage 2
+      if [[ $2 = "-" ]]; then
+        exec 5<&1
+      elif [[ ! -r $2 ]]; then
+        echo "ERROR: cannot read query file \"$2\"" >&2
+        exit 3
+      else
+        exec 5<"$2"
+      fi
+      while read -u5 nam val; do
+        posts["$nam"]=$val
+      done
+    elif [[ $oname = p ]]; then
+      [[ $# -ge 2 ]] || usage 2
+      posts["${2%%=*}"]=${2#*=}
+      shift 2
+    elif [[ $oname = f ]]; then
+      [[ $# -ge 2 ]] || usage 2
+      if [[ $2 = "-" ]]; then
+        posts['file']="@$(copyin)"
+      else
+        posts['file']="@$2"
+      fi
+      shift 2
+    elif [[ $oname = g ]]; then
+      td="$tempdir/_tarball"
+      mkdir "$td"
+      shift
+      while [[ $# -ge 1 && $1 != "+" ]]; do
+        cp -r "$1" "$td"/
+        shift
+      done
+      [[ $# -ge 1 ]] && shift
+      tb=$(readlink -f "$tempdir/_files.tar.gz")
+      pushd "$td" >/dev/null
+      tar czf "$tb" *
+      popd >/dev/null
+      posts['file']="@$tb"
+    elif [[ $oname = h ]]; then
+      if [[ -n $cmd ]]; then
+        if [[ ${#args[@]} -eq 0 ]]; then
+          args=( "$cmd" )
+        else
+          usage 2
+        fi
+      fi
+      cmd="help"
+      shift
+    elif [[ $oname =~ [sr] ]]; then # no-arg options
+      opts[$oname]=true
+      shift
+    else
+      [[ $# -ge 2 ]] || usage 2
+      opts[$oname]=$2
+      shift 2
+    fi
+  elif [[ -z $cmd ]]; then
+    cmd=$1
+    shift
+  else
+    args+=( "$1" )
+    shift
+  fi
+done
+
+
+#### command-specific usage ####
+if [[ -z $cmd ]]; then
+  usage 2
+elif [[ $cmd =~ ^h ]]; then
+  if [[ ${#args[@]} -eq 0 ]]; then
+    usage 0
+  else case "${args[0]}" in
+    p*)
+      echo "\
+Usage: $0 p[roject] [<subcommand>] [<options>]
+
+With no <name>, list available projects.
+With <name>, available subcommands are:
+Available subcommands are:
+  l[ist]  : list all projects for the course (default)
+  i[nfo]  : show details for a certain project
+  c[reate]: create a new project
+  m[odify]: modify existing project
+  d[elete]: delete existing project
+course must be specified for every subcommand.
+project must be specified for all subcommands except \"all\".
+Results are displayed in query-file format.
+
+Example: $0 project info -p project=lab10 >lab10.txt
+         ... change lab10.txt as you like ...
+         $0 project modify -p project=lab10 -q lab10.txt
+
+Options:"
+      genopts
+      exit 0
+      ;;
+    m*)
+      echo "\
+Usage: $0 manual [<urlpath>] [<options>]
+
+Runs a query manually, as specified in config files and/or options.
+If <urlpath> is given, it is appended to the base url.
+
+Example: $0 manual users/list
+
+Options:"
+      genopts
+      exit 0
+      ;;
+    *)
+      usage 2
+      ;;
+  esac; fi
+fi
+
+
+#### search for config files in parent directories ####
+if [[ ${#configs[@]} -eq 0 ]]; then
+  curdir=$(pwd)
+  reldir=""
+  while [[ -n $curdir && $curdir != "/" ]]; do
+    if [[ -r $curdir ]]; then
+      for f in ".subtoolrc" "subtoolrc"; do
+        if [[ -r "$curdir/$f" ]]; then
+          configs+=( "$reldir$f" )
+        fi
+      done
+    fi
+    curdir=$(dirname "$curdir")
+    reldir="../$reldir"
+  done
+fi
+
+
+#### open the config file to run this command ####
+configonly=${opts[s]-false}
+unset -v 'opts[s]'
+
+if ! $configonly; then
+  curconfig="$tempdir/_curconfig"
+  exec 4>"$curconfig"
+else
+  exec 4>&1
+fi
+
+
+#### process commands ####
+# special variables to set:
+# url - to query that path in the API
+# jqproc - run this jq script on the output
+# table - display jq output object as a table
+table=false
+# callback - function to call if the command fails somehow
+if [[ $cmd =~ ^p ]]; then
+  #### PROJECT ####
+  url="project"
+  if [[ ${#args[@]} -ge 2 ]]; then
+    echo "ERROR: too many arguments to $cmd command" >&2
+    exit 2
+  fi
+  subcmd=${args[0]-'list'}
+  case "$subcmd" in
+    l*)
+      url+="/list"
+      jqproc='.[].project'
+      ;;
+    i*)
+      url+='/list'
+      jqproc='.[0] | objects'
+      table=true
+      ;;
+    c*)
+      url+='/add'
+      table=true
+      ;;
+    m*)
+      url+='/update'
+      table=true
+      ;;
+    d*)
+      url+='/delete'
+      ;;
+    *)
+      echo "ERROR: unrecognized $cmd subcommand $subcmd" >&2
+      echo "Try running $0 help $cmd" >&2
+      exit 2
+  esac
+elif [[ $cmd =~ ^m ]]; then
+  #### MANUAL ####
+  if [[ ${#args[@]} -eq 0 ]]; then
+    :
+  elif [[ ${#args[@]} -eq 1 ]]; then
+    url=${args[0]}
+  else
+    echo "too many arguments for manual command" >&2
+    exit 2
+  fi
+else
+  echo "invalid command \"$cmd\"" >&2
+  exit 2
+fi
+
+
+#### process general options ####
+urlbase=${opts[u]-$defurlbase}
+unset -v 'opts[u]'
+
+if [[ -v opts[r] && -v opts[j] ]]; then
+  echo "ERROR: Options -r and -j conflict" >&2
+  exit 2
+fi
+
+rawout=${rawout-${opts[r]-false}}
+unset -v 'opts[r]'
+
+if [[ -v opts[j] ]]; then
+  if [[ -v jqproc ]]; then
+    echo "WARNING: -j option is overriding command-based processing" >&2
+  fi
+  jqproc=${opts[j]}
+  unset -v 'opts[j]'
+fi
+
+if $rawout && [[ -v jqproc ]]; then
+  echo "WARNING: -r option is overriding command-based processing" >&2
+  unset -v 'jqproc'
+fi
+
+for badopt in ${!opts[@]}; do
+  echo "ERROR: invalid option $badopt" >&2
+  exit 2
+done
+
+# helper function to add a line to the local config file
+function confline {
+  local res=$2
+  res=${res//\\/\\\\}
+  res=${res//\"/\\\"}
+  echo "$1 = \"$res\"" >&4
+}
+
+# helper function to add POST form parameters to config file
+function formline {
+  confline "form" "$1=$2"
+}
+
+for cfile in "${configs[@]}"; do
+  confline "config" "$cfile"
+done
+
+for pname in "${!posts[@]}"; do
+  formline "$pname" "${posts["$pname"]}"
+done
+
+if [[ -v url ]]; then
+  confline "url" "$urlbase/$url"
+fi
+
+
+#### close the config file and run curl already! ####
+exec 4>&-
+
+function maybecurl {
+  alljq=".results | values${jqproc:+" | $jqproc"}"
+  if $configonly; then
+    savetemp=true
+    echo "Config file written to stdout; use with curl directly or with $0 manual" >&2
+    if [[ -v jqproc ]]; then
+      echo "Pipe output to the command" >&2
+      echo "  jq -r ${alljq@Q}" >&2
+    fi
+    return 0
+  else
+    set +e
+    $CURL -K "$curconfig" | (
+      if $rawout; then
+        cat
+      else
+        jq -r ".status, if (.status == 1) then ($alljq) else .message end" | (
+          read oz
+          [[ $oz -eq 1 ]] || exec 1>&2
+          cat
+        ) | (
+          if [[ $table = 'true' ]]; then
+            jq -r 'to_entries | .[] | .key + "|" + (.value | tostring)' | column -ts'|'
+          else
+            cat
+          fi
+        ) | grep ''
+      fi
+    )
+    ret=$?
+    set -e
+    return $ret
+  fi
+}
+
+maybecurl
+
+# XXX
+# sshcurl -K cconf http://submit.cs.usna.edu/api/project/list | jq -r '.results[].project'
+# jq -r '.results[] | select(.project == "lab2") | to_entries | .[] | .key + "," + (.value | tostring)' 
