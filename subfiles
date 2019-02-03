@@ -83,7 +83,7 @@ while true; do
 done
 unset -v 'curopt'
 
-declare -A newfiles
+declare -A newfiles=()
 while [[ $# -ge 1 && ${1:0:1} != '-' ]]; do
   if [[ -d $1 ]]; then
     exec 4< <(find "$1" -mindepth 1)
@@ -156,19 +156,15 @@ unset -v 'fname'
 #### delete of old files which aren't new ####
 
 if $delete; then
-  echo "Deleting ${justold[@]}..."
-  for fname in "${justold[@]}"; do
-    subtool file delete "${oldfiles[$fname]}" "$@" >/dev/null
-  done
-  unset -v 'fname'
-fi
-
-
-#### download current files ####
-
-if ! $update; then
-  odir="$tempdir/old"
-  subtool file all "$@" -d "$odir"
+  if [[ ${#justold[@]} -gt 0 ]]; then
+    echo "Deleting ${justold[@]}..."
+    for fname in "${justold[@]}"; do
+      subtool file delete "${oldfiles[$fname]}" "$@" >/dev/null
+    done
+    unset -v 'fname'
+  else
+    echo "No old files to delete"
+  fi
 fi
 
 
@@ -182,6 +178,8 @@ if [[ ${#justnew[@]} -gt 0 ]]; then
   unset -v 'fname'
   subtool file upload "${toup[@]}" "$@"
   unset -v 'toup'
+else
+  echo "No new files to upload"
 fi
 
 
@@ -196,10 +194,22 @@ if $update && [[ ${#oldnew[@]} -gt 0 ]]; then
 fi
 
 
+#### download current files ####
+# XXX: not currently working
+
+# if ! $update; then
+#   odir="$tempdir/old"
+#   subtool file all "$@" -d "$odir"
+# fi
+
+
 #### determine which files have changed ####
 toup=()
+echo "checking pre-existing files..."
 for fname in "${oldnew[@]}"; do
-  if ! cmp -s "$odir/$fname" "${newfiles[$fname]}"; then
+  # XXX: replace this line when the API bug for testfile/pull is fixed
+  # if ! cmp -s "$odir/$fname" "${newfiles[$fname]}"; then
+  if ! subtool file get "${oldfiles[$fname]}" "$@" | cmp -s - "${newfiles[$fname]}"; then
     toup+=( "$fname" )
   fi
 done
@@ -209,11 +219,14 @@ if [[ ${#toup[@]} -gt 0 ]]; then
   echo "re-uploading changed files ${toup[@]}..."
   for fname in "${toup[@]}"; do
     jq -r ".[] | select(.filename == \"$fname\") | to_entries | .[] | (.key | tostring) + \"|\" + (.value | tostring)" "$finfo" >"$qfile"
+    subtool file delete "${oldfiles[$fname]}" "$@" >/dev/null
     subtool file upload "${newfiles[$fname]}" "$@" -q "$qfile"
     rm -f "$qfile"
   done
   unset -v 'fname'
   unset -v 'qfile'
+else
+  echo "all pre-existing files were up to date"
 fi
 unset -v 'toup'
 

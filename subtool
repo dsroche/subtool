@@ -224,6 +224,7 @@ Usage: $0 p[roject] [<subcommand>] [<options>]
 
 Available subcommands are:
   l[ist]  : list all projects for the course (default)
+            projects are one per line as \"<pid> <project>\"
   i[nfo]  : show details for a certain project
   c[reate]: create a new project
   m[odify]: modify existing project
@@ -257,8 +258,11 @@ Available subcommands are:
     delete the given file, and return a list of those remaining
   g[et] <fileid>
     download the given file
-  a[ll]
+  a[ll] <pid>
+    NOTE: DOES NOT CURRENTLY WORK DUE TO API BUG
     download all files as a tar.gz (see -d option)
+    Unfortunately, this requires the numerical project id (pid);
+    see the \"project list\" command.
 
 course and project must be speficied for all subcommands.
 
@@ -344,7 +348,7 @@ if [[ $cmd =~ ^p ]]; then
   case "$subcmd" in
     l*)
       url+="/list"
-      jqproc='.[].project'
+      jqproc='.[] | (.pid | tostring) + " " + .project'
       ;;
     i*)
       url+='/list'
@@ -411,7 +415,8 @@ elif [[ $cmd =~ ^f ]]; then
       rawout=true
       ;;
     a*)
-      [[ ${#args[@]} -eq 1 ]] || subhelp "must specify fileid"
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify pid"
+      posts['pid']=${args[1]}
       url+="/pull"
       rawout=true
       ;;
