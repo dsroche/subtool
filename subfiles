@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+set -e
+set -u
+shopt -s nullglob
+
+srcdir=$(dirname "$(readlink -f "$0")")
+
+function usage {
+  echo "\
+Usage: $0 <subfiles_options> <files>... <subtool_options>
+
+This frontent to subtool adds, removes, or updates the files
+mixed with student code for testing purposes.
+
+An apikey, course, and project name are all required to be
+sent to subtool either via -p options or config files; see
+\"subtool -h\" for more details.
+
+Available <subfiles_options> are:
+  -u
+    Update metadata only; do not upload files which already exist.
+  -d
+    Delete any files *not* named here.
+    (e.g., with no <files>, delete all on the server)
+  -h
+    Display this help and exit"
+  [[ $# -eq 1 ]] && exit $1
+}
+
+
+#### create a temp folder which is removed on exit ####
+tempdir=$(mktemp --tmpdir -d subfilesXXXXXXXX)
+chmod 700 "$tempdir"
+
+function cleanup {
+  rm -rf "$tempdir"
+  return 0
+}
+
+trap cleanup EXIT
+
+
+#### helper function to copy stdin to a file ####
+function copyin {
+  local fname="$tempdir/_stdin"
+  cat >"$fname"
+  echo "$fname"
+}
+
+
+#### parse command line arguments ####
+delete=false
+update=false
+
+curopt="" # leftover options, used in the loop
+while true; do
+  while [[ -z $curopt && $# -ge 1 && ${1:0:1} = '-' ]]; do
+    curopt=${1:1}
+    shift
+  done
+  [[ -n $curopt ]] || break
+
+  oname=${curopt:0:1} # letter for this option
+  curopt=${curopt:1} # the rest of the argument, other options or an argument
+
+  case $oname in
+    d)
+      delete=true
+      ;;
+    u)
+      update=true
+      ;;
+    h)
+      usage 0
+      ;;
+    *)
+      usage 2
+      ;;
+  esac
+
+  unset -v 'oname'
+done
+unset -v 'curopt'
+
+declare -A newfiles
+while [[ $# -ge 1 && ${1:0:1} != '-' ]]; do
+  if [[ -d $1 ]]; then
+    exec 4< <(find "$1" -mindepth 1)
+    while read -u4 fname; do
+      [[ -d $fname ]] && continue
+      if [[ ! -r $fname ]]; then
+        echo "ERROR: cannot read file \"$fname\"" >&2
+        exec 4<&-
+        exit
+      fi
+      newfiles[$(basename "$fname")]=$fname
+    done
+    exec 4<&-
+    unset -v 'fname'
+  elif [[ -r $1 ]]; then
+    newfiles[$(basename "$1")]=$1
+  else
+    echo "ERROR: cannot read file \"$1\"" >&2
+    exit 3
+  fi
+  shift
+done
+
+if [[ ${#newfiles[@]} -eq 0 ]]; then
+  if $delete; then
+    yn=""
+    while [[ ! $yn =~ [yn] ]]; do
+      read -n1 -p "WARNING: all existing files will be deleted. Continue? [y/n]" yn
+    done
+    unset -v 'yn'
+  else
+    echo "ERROR: no files specified; abording" >&2
+    exit 2
+  fi
+fi
+
+# note: remaining arguments are for subtool
+
+
+#### get ids of current files ####
+declare -A oldfiles
+finfo="$tempdir/_finfo"
+subtool manual testfile/list "$@" >"$finfo"
+exec 4< <(jq -r '.[] | ((.fid | tostring) + " " + .filename)' "$finfo")
+while read -u4 fid fname; do
+  oldfiles["$fname"]=$fid
+done
+exec 4<&-
+unset -v 'fid'
+unset -v 'fname'
+
+justold=()
+justnew=()
+oldnew=()
+for fname in "${!newfiles[@]}"; do
+  if [[ -v oldfiles["$fname"] ]]; then
+    oldnew+=( "$fname" )
+  else
+    justnew+=( "$fname" )
+  fi
+done
+for fname in "${!oldfiles[@]}"; do
+  if [[ ! -v newfiles["$fname"] ]]; then
+    justold+=( "$fname" )
+  fi
+done
+unset -v 'fname'
+
+
+#### delete of old files which aren't new ####
+
+if $delete; then
+  echo "Deleting ${justold[@]}..."
+  for fname in "${justold[@]}"; do
+    subtool file delete "${oldfiles[$fname]}" "$@" >/dev/null
+  done
+  unset -v 'fname'
+fi
+
+
+#### download current files ####
+
+if ! $update; then
+  odir="$tempdir/old"
+  subtool file all "$@" -d "$odir"
+fi
+
+
+#### add new files ####
+if [[ ${#justnew[@]} -gt 0 ]]; then
+  echo "Uploading new files ${justnew[@]}..."
+  toup=()
+  for fname in "${justnew[@]}"; do
+    toup+=( "${newfiles[$fname]}" )
+  done
+  unset -v 'fname'
+  subtool file upload "${toup[@]}" "$@"
+  unset -v 'toup'
+fi
+
+
+#### update metadata ####
+if $update && [[ ${#oldnew[@]} -gt 0 ]]; then
+  echo "updating metadata for ${oldnew[@]}..."
+  for fname in "${oldnew[@]}"; do
+    subtool file modify "${oldfiles[$fname]}" "$@" >/dev/null
+  done
+  unset -v 'fname'
+  exit 0
+fi
+
+
+#### determine which files have changed ####
+toup=()
+for fname in "${oldnew[@]}"; do
+  if ! cmp -s "$odir/$fname" "${newfiles[$fname]}"; then
+    toup+=( "$fname" )
+  fi
+done
+unset -v 'fname'
+if [[ ${#toup[@]} -gt 0 ]]; then
+  qfile="$tempdir/_qfile"
+  echo "re-uploading changed files ${toup[@]}..."
+  for fname in "${toup[@]}"; do
+    jq -r ".[] | select(.filename == \"$fname\") | to_entries | .[] | (.key | tostring) + \"|\" + (.value | tostring)" "$finfo" >"$qfile"
+    subtool file upload "${newfiles[$fname]}" "$@" -q "$qfile"
+    rm -f "$qfile"
+  done
+  unset -v 'fname'
+  unset -v 'qfile'
+fi
+unset -v 'toup'
+
+:
