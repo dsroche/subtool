@@ -1,4 +1,4 @@
-#!/usr/bin/env bash --norc
+#!/usr/bin/env bash
 
 set -e
 set -u
@@ -8,7 +8,7 @@ CURL=${CURL-curl} # allow to specify an alternate command for curl
 srcdir=$(dirname "$(readlink -f "$0")")
 defurlbase="http://submit.cs.usna.edu/api"
 
-# option flags: kqupfj (with arg), srh (no args)
+# option flags: kqupfjd (with arg), srh (no args)
 
 ### general usage ####
 function usage {
@@ -22,6 +22,9 @@ Available commands:
   f[iles] (for test cases)
   m[anual]
   h[elp]
+
+Most command require an apikey and course to be specified, either
+using -p or in a config file. Many commands also require a project.
 
 Options (may be more for specific commands):"
   genopts
@@ -50,13 +53,15 @@ function genopts {
   -f <filename>
     Specify a file to be sent along with the query.
     \"-\" means to use stdin
-  -g <files>... +
-    Like -f, but combine all files until a literal +
-    into a single gzipped tarball to send
+  -g <filename>
+    Like -f, but combine all files into a single .tar.gz to send
+    May be given multiple times.
   -j <script>
     Run the given jq script with the returned JSON value.
   -r
     Return raw input, don't process through jq
+  -d <folder>
+    Download and extract a tar.gz into the specified folder
   -h
     Same as \"help\". Can be used in conjunction with specific commands"
 }
@@ -99,6 +104,16 @@ args=()
 configs=()
 declare -A opts
 declare -A posts
+files2tar=()
+
+function add2tar {
+  if [[ ! -r $1 ]]; then
+    echo "ERROR: cannot read tarball file $1" >&2
+    exit 3
+  fi
+  files2tar+=( "$1" )
+  return 0
+}
 
 while [[ $# -gt 0 ]]; do
   if [[ $# -ge 1 && ${1:0:1} = '-' ]]; then
@@ -141,19 +156,9 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
     elif [[ $oname = g ]]; then
-      td="$tempdir/_tarball"
-      mkdir "$td"
-      shift
-      while [[ $# -ge 1 && $1 != "+" ]]; do
-        cp -r "$1" "$td"/
-        shift
-      done
-      [[ $# -ge 1 ]] && shift
-      tb=$(readlink -f "$tempdir/_files.tar.gz")
-      pushd "$td" >/dev/null
-      tar czf "$tb" *
-      popd >/dev/null
-      posts['file']="@$tb"
+      [[ $# -ge 2 ]] || usage 2
+      add2tar "$2"
+      shift 2
     elif [[ $oname = h ]]; then
       if [[ -n $cmd ]]; then
         if [[ ${#args[@]} -eq 0 ]]; then
@@ -186,15 +191,14 @@ done
 if [[ -z $cmd ]]; then
   usage 2
 elif [[ $cmd =~ ^h ]]; then
+  (
   if [[ ${#args[@]} -eq 0 ]]; then
-    usage 0
+    usage
   else case "${args[0]}" in
     p*)
       echo "\
 Usage: $0 p[roject] [<subcommand>] [<options>]
 
-With no <name>, list available projects.
-With <name>, available subcommands are:
 Available subcommands are:
   l[ist]  : list all projects for the course (default)
   i[nfo]  : show details for a certain project
@@ -211,7 +215,35 @@ Example: $0 project info -p project=lab10 >lab10.txt
 
 Options:"
       genopts
-      exit 0
+      ;;
+    f*)
+      echo "\
+Usage: $0 f[iles] [<subcommand> <filenames>...] [<options>]
+
+Available subcommands are:
+  l[ist]
+    list all testcase files for the given project (default)
+    The list consists of \"<fileid> <filename>\" lines.
+  i[nfo] <filename>
+    show info for the named file in queriy-file format
+  u[pload] <filenames>...
+    upload a bunch of files
+  d[elete] <fileid>
+    delete the given file, and return a list of those remaining
+  g[et] <fileid>
+    download the given file
+  a[ll]
+    download all files as a tar.gz (see -d option)
+
+course and project must be speficied for all subcommands.
+
+Example: $0 files list -p project=lab10
+         $0 files info file1.txt
+         $0 files upload file2.txt file3.txt -p project=lab10
+         $0 files all -p project=lab10 -d output_folder
+
+Options:"
+      genopts
       ;;
     m*)
       echo "\
@@ -224,12 +256,13 @@ Example: $0 manual users/list
 
 Options:"
       genopts
-      exit 0
       ;;
     *)
-      usage 2
+      usage
       ;;
   esac; fi
+  ) | less -FX
+  exit 0
 fi
 
 
@@ -262,6 +295,13 @@ else
   exec 4>&1
 fi
 
+# helper function for subcommands, relies on $cmd and $subcmd
+function subhelp {
+  echo "ERROR: $1 in $cmd $subcmd" >&2
+  echo "Run \"$0 help $cmd\" for help." >&2
+  exit 2
+}
+
 
 #### process commands ####
 # special variables to set:
@@ -269,14 +309,12 @@ fi
 # jqproc - run this jq script on the output
 # table - display jq output object as a table
 table=false
+blankok=false
 # callback - function to call if the command fails somehow
 if [[ $cmd =~ ^p ]]; then
   #### PROJECT ####
   url="project"
-  if [[ ${#args[@]} -ge 2 ]]; then
-    echo "ERROR: too many arguments to $cmd command" >&2
-    exit 2
-  fi
+  [[ ${#args[@]} -ge 2 ]] && subhelp "too many arguments"
   subcmd=${args[0]-'list'}
   case "$subcmd" in
     l*)
@@ -300,9 +338,54 @@ if [[ $cmd =~ ^p ]]; then
       url+='/delete'
       ;;
     *)
-      echo "ERROR: unrecognized $cmd subcommand $subcmd" >&2
-      echo "Try running $0 help $cmd" >&2
-      exit 2
+      subhelp "unrecognized subcommand"
+      ;;
+  esac
+elif [[ $cmd =~ ^f ]]; then
+  #### TESTCASE FILES ####
+  url="testfile"
+  subcmd=${args[0]-'list'}
+  case "$subcmd" in
+    l*)
+      [[ ${#args[@]} -ge 2 ]] && subhelp "too many arguments"
+      url+="/list"
+      jqproc='.[] | ((.fid | tostring) + " " + .filename)'
+      blankok=true
+      ;;
+    i*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify filename"
+      url+="/list"
+      jqproc=".[] | select(.filename == \"${args[1]}\")"
+      table=true
+      ;;
+    u*)
+      url+="/upload"
+      for (( i = 1; i < ${#args[@]}; i++ )); do
+        add2tar "${args[i]}"
+      done
+      rawout=true # XXX because of bug in API
+      ;;
+    d*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify fileid"
+      url+="/delete"
+      posts['fid']=${args[1]}
+      jqproc='.[] | ((.fid | tostring) + " " + .filename)'
+      blankok=true
+      ;;
+    g*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify fileid"
+      posts['fid']=${args[1]}
+      url+="/pull-file"
+      rawout=true
+      ;;
+    a*)
+      [[ ${#args[@]} -eq 1 ]] || subhelp "must specify fileid"
+      url+="/pull"
+      rawout=true
+      ;;
+    *)
+      subhelp "unrecognized subcommand"
+      ;;
   esac
 elif [[ $cmd =~ ^m ]]; then
   #### MANUAL ####
@@ -332,6 +415,23 @@ fi
 rawout=${rawout-${opts[r]-false}}
 unset -v 'opts[r]'
 
+if [[ -v opts[d] ]]; then
+  unset -v 'opts[d]'
+  rawout=true
+  outdir=${opts[d]}
+  if [[ -e $outdir ]]; then
+    if [[ ! -d $outdir ]]; then
+      echo "ERROR: $outdir must name a directory for output" >&2
+      exit 3
+    fi
+  else
+    if ! mkdir "$outdir"; then
+      echo "ERROR: could not create output directory $outdir" >&2
+      exit 3
+    fi
+  fi
+fi
+
 if [[ -v opts[j] ]]; then
   if [[ -v jqproc ]]; then
     echo "WARNING: -j option is overriding command-based processing" >&2
@@ -343,6 +443,20 @@ fi
 if $rawout && [[ -v jqproc ]]; then
   echo "WARNING: -r option is overriding command-based processing" >&2
   unset -v 'jqproc'
+fi
+
+# combine input files into a single tarball
+if [[ ${#files2tar[@]} -gt 0 ]]; then
+  td="$tempdir/_tarball"
+  mkdir "$td"
+  for f in "${files2tar[@]}"; do
+    cp -r "$f" "$td"/
+  done
+  tb=$(readlink -f "$tempdir/_files.tar.gz")
+  pushd "$td" >/dev/null
+  tar czf "$tb" *
+  popd >/dev/null
+  posts['file']="@$tb"
 fi
 
 for badopt in ${!opts[@]}; do
@@ -384,7 +498,9 @@ function maybecurl {
   if $configonly; then
     savetemp=true
     echo "Config file written to stdout; use with curl directly or with $0 manual" >&2
-    if [[ -v jqproc ]]; then
+    if $outdir; then
+      echo "The output will be a binary .tar.gz file" >&2
+    elif ! $rawout; then
       echo "Pipe output to the command" >&2
       echo "  jq -r ${alljq@Q}" >&2
     fi
@@ -393,7 +509,12 @@ function maybecurl {
     set +e
     $CURL -K "$curconfig" | (
       if $rawout; then
-        cat
+        if [[ -v outdir ]]; then
+          cd "$outdir"
+          tar -x -z -v -k -f-
+        else
+          cat
+        fi
       else
         jq -r ".status, if (.status == 1) then ($alljq) else .message end" | (
           read oz
@@ -405,7 +526,9 @@ function maybecurl {
           else
             cat
           fi
-        ) | grep ''
+        ) | (
+          $blankok && cat || grep ''
+        )
       fi
     )
     ret=$?
