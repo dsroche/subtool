@@ -22,7 +22,9 @@ Usage: $0 <command> [<args>] [<options>]
 Available commands:
   p[roject]
   f[iles] (for test cases)
+  t[estcase]
   m[anual]
+  i[nternal] (undocumented stuff)
   h[elp]
 
 Most command require an apikey and course to be specified, either
@@ -66,6 +68,85 @@ function genopts {
     Download and extract a tar.gz into the specified folder
   -h
     Same as \"help\". Can be used in conjunction with specific commands"
+}
+
+
+#### helper functions to convert between query file format and a single json object
+function query2arr {
+  # assigns query on filedes 5 to associative array "arr"
+  local name val bstr line f2
+  while read -u5 -r name val; do
+    if [[ ${val:0:2} == "<<" ]]; then
+      bstr=$(sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//' -e "s/^['\"]\(.*\)['\"]$/\1/" <<<"${val:2}")
+      val=''
+      f2=true
+      while IFS='' read -r line && [[ $line != $bstr ]]; do
+        if $f2; then
+          f2=false
+        else
+          val+="\\n"
+        fi
+        line=${line//\\/\\\\}
+        line=${line//\"/\\\"}
+        line=${line//	/\\t}
+        val+="$line"
+      done
+      arr["$name"]="$val"
+    else
+      val=${val//\\/\\\\}
+      val=${val//\"/\\\"}
+      val=${val//	/\\t}
+      arr["$name"]="$val"
+    fi
+  done
+  return 0
+}
+
+function query2json {
+  local name val first arr
+  exec 5<&0
+  declare -A arr=()
+  query2arr
+  exec 5<&-
+  echo -n '{'
+  first=true
+  for name in "${!arr[@]}"; do
+    if $first; then
+      first=false
+    else
+      echo -n ','
+    fi
+    val=${arr["$name"]}
+    if [[ -n $val && $val =~ ^[0-9]*$ ]]; then
+      echo -n "\"$name\": $val"
+    else
+      echo -n "  \"$name\": \"$val\""
+    fi
+  done
+  echo '}'
+  return 0
+}
+
+function json2query {
+  local name val rawval bstr
+  exec 4< <(jq '[to_entries | .[] | [(.key | tostring),(.value | tostring)]] | flatten | .[]')
+  while read -u4 name && read -u4 -r val; do
+    echo -n "${name//\"/} "
+    rawval=$(jq -r '.' <<<"$val")
+    if [[ $(wc -l <<<"$rawval") -le 1 ]]; then
+      echo "$rawval"
+    else
+      bstr='END'
+      while [[ $rawval =~ $bstr ]]; do
+        bstr+="D"
+      done
+      echo "<<$bstr"
+      echo "$rawval"
+      echo "$bstr"
+    fi
+  done
+  exec 4<&-
+  return 0
 }
 
 
@@ -162,16 +243,20 @@ while true; do
       ;;
     q)
       if [[ $optarg = "-" ]]; then
-        exec 5<&1
+        exec 5<&0
       elif [[ ! -r $optarg ]]; then
         echo "ERROR: cannot read query file \"$optarg\"" >&2
         exit 3
       else
         exec 5<"$optarg"
       fi
-      while read -u5 nam val; do
-        posts["$nam"]=$val
+      declare -A arr=()
+      query2arr
+      exec 5<&-
+      for nam in "${!arr[@]}"; do
+        posts["$nam"]=${arr["$nam"]}
       done
+      unset -v 'arr'
       ;;
     p)
       posts["${2%%=*}"]=${2#*=}
@@ -270,6 +355,23 @@ Example: $0 files list -p project=lab10
          $0 files info file1.txt
          $0 files upload file2.txt file3.txt -p project=lab10
          $0 files all -p project=lab10 -d output_folder
+
+Options:"
+      genopts
+      ;;
+    t*)
+      echo "\
+Usage: $0 t[estcase] [<subcommand> [<tid>]] [<options>]
+
+Available subcommands are:
+  l[ist]        : list all test cases for current project (default)
+                  testcases are one per line as \"<tid> <rulename>\"
+  i[nfo] <tid>  : show details for a certain testcase
+  c[reate]      : create a new testcase
+  m[odify] <tid>: modify existing testcase
+  d[elete] <tid>: delete existing testcase
+course and project must be specified for every subcommand.
+Results are displayed in query-file format.
 
 Options:"
       genopts
@@ -424,6 +526,57 @@ elif [[ $cmd =~ ^f ]]; then
       subhelp "unrecognized subcommand"
       ;;
   esac
+elif [[ $cmd =~ ^t ]]; then
+  #### TESTCASE ####
+  url="testcase"
+  subcmd=${args[0]-'list'}
+  case "$subcmd" in
+    l*)
+      [[ ${#args[@]} -le 1 ]] || subhelp "too many arguments"
+      url+="/list"
+      jqproc='.[] | (.tid | tostring) + " " + .rulename'
+      blankok=true
+      ;;
+    i*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify tid"
+      url+='/list'
+      jqproc=".[] | select(.tid == ${args[1]})"
+      table=true
+      ;;
+    c*)
+      [[ ${#args[@]} -le 1 ]] || subhelp "too many arguments"
+      url+='/add'
+      table=true
+      ;;
+    m*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify tid"
+      posts['tid']=${args[1]}
+      url+='/update'
+      table=true
+      ;;
+    d*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify tid"
+      posts['tid']=${args[1]}
+      url+='/delete'
+      jqproc='.[] | (.tid | tostring) + " " + .rulename'
+      blankok=true
+      ;;
+    *)
+      subhelp "unrecognized subcommand"
+      ;;
+  esac
+elif [[ $cmd =~ ^i ]]; then
+  if [[ ${#args[@]} -lt 1 ]]; then
+    exit 2
+  elif [[ ${args[0]} = 'j2q' ]]; then
+    json2query
+    exit 0
+  elif [[ ${args[0]} = 'q2j' ]]; then
+    query2json
+    exit 0
+  else
+    exit 2
+  fi
 elif [[ $cmd =~ ^m ]]; then
   #### MANUAL ####
   if [[ ${#args[@]} -eq 0 ]]; then
@@ -559,7 +712,8 @@ function maybecurl {
           cat
         ) | (
           if [[ $table = 'true' ]]; then
-            jq -r 'to_entries | .[] | (.key | tostring) + "|" + (.value | tostring)' | column -ts'|'
+            json2query
+            #jq -r 'to_entries | .[] | (.key | tostring) + "|" + (.value | tostring)' | column -ts'|'
           else
             cat
           fi
