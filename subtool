@@ -8,7 +8,9 @@ CURL=${CURL-curl} # allow to specify an alternate command for curl
 srcdir=$(dirname "$(readlink -f "$0")")
 defurlbase="http://submit.cs.usna.edu/api"
 
-# option flags: kqupfjd (with arg), srh (no args)
+# listing all option flags
+opt0arg=srh
+opt1arg=kqupfjd
 
 ### general usage ####
 function usage {
@@ -115,51 +117,76 @@ function add2tar {
   return 0
 }
 
-while [[ $# -gt 0 ]]; do
-  if [[ $# -ge 1 && ${1:0:1} = '-' ]]; then
-    oname=${1:1:1}
-    [[ $oname = "-" ]] && oname=${1:2:1}
-    if [[ $oname = k ]]; then
-      [[ $# -ge 2 ]] || usage 2
-      if [[ $2 = "-" ]]; then
+curopt="" # leftover options, used in the loop
+while true; do
+  while [[ -z $curopt && $# -ge 1 ]]; do
+    if [[ ${1:0:1} = '-' ]]; then
+      curopt=${1:1}
+    elif [[ -z $cmd ]]; then
+      cmd=$1
+    else
+      args+=( "$1" )
+    fi
+    shift
+  done
+  [[ -n $curopt ]] || break
+
+  oname=${curopt:0:1} # letter for this option
+  curopt=${curopt:1} # the rest of the argument, other options or an argument
+
+  unset -v 'optarg'
+  if [[ $oname =~ [$opt1arg] ]]; then
+    # if option takes an argument, assign it
+    if [[ -n $curopt ]]; then
+      optarg=$curopt
+      curopt=''
+    elif [[ $# -ge 1 ]]; then
+      optarg=$1
+      shift
+    else
+      echo "ERROR: option -$oname needs an argument" >&2
+      exit 2
+    fi
+  fi
+
+  case $oname in
+    k)
+      if [[ $optarg = "-" ]]; then
         configs+=( "$(copyin)" )
-      elif [[ ! -r $2 ]]; then
-        echo "ERROR: cannot read config file \"$2\"" >&2
+      elif [[ ! -r $optarg ]]; then
+        echo "ERROR: cannot read config file \"$optarg\"" >&2
         exit 3
       else
-        configs+=( "$2" )
+        configs+=( "$optarg" )
       fi
-      shift 2
-    elif [[ $oname = q ]]; then
-      [[ $# -ge 2 ]] || usage 2
-      if [[ $2 = "-" ]]; then
+      ;;
+    q)
+      if [[ $optarg = "-" ]]; then
         exec 5<&1
-      elif [[ ! -r $2 ]]; then
-        echo "ERROR: cannot read query file \"$2\"" >&2
+      elif [[ ! -r $optarg ]]; then
+        echo "ERROR: cannot read query file \"$optarg\"" >&2
         exit 3
       else
-        exec 5<"$2"
+        exec 5<"$optarg"
       fi
       while read -u5 nam val; do
         posts["$nam"]=$val
       done
-    elif [[ $oname = p ]]; then
-      [[ $# -ge 2 ]] || usage 2
+      ;;
+    p)
       posts["${2%%=*}"]=${2#*=}
-      shift 2
-    elif [[ $oname = f ]]; then
-      [[ $# -ge 2 ]] || usage 2
-      if [[ $2 = "-" ]]; then
+      ;;
+    f)
+      if [[ $optarg = "-" ]]; then
         posts['file']="@$(copyin)"
       else
-        posts['file']="@$2"
+        posts['file']="@$optarg"
       fi
-      shift 2
-    elif [[ $oname = g ]]; then
-      [[ $# -ge 2 ]] || usage 2
-      add2tar "$2"
-      shift 2
-    elif [[ $oname = h ]]; then
+      ;;
+    g)
+      add2tar "$optarg"
+      ;;
+    h)
       if [[ -n $cmd ]]; then
         if [[ ${#args[@]} -eq 0 ]]; then
           args=( "$cmd" )
@@ -168,22 +195,18 @@ while [[ $# -gt 0 ]]; do
         fi
       fi
       cmd="help"
-      shift
-    elif [[ $oname =~ [sr] ]]; then # no-arg options
+      ;;
+    [$opt1arg])
+      opts[$oname]=$optarg
+      ;;
+    [$opt0arg])
       opts[$oname]=true
-      shift
-    else
-      [[ $# -ge 2 ]] || usage 2
-      opts[$oname]=$2
-      shift 2
-    fi
-  elif [[ -z $cmd ]]; then
-    cmd=$1
-    shift
-  else
-    args+=( "$1" )
-    shift
-  fi
+      ;;
+    *)
+      echo "ERROR: unrecognized option -$oname" >&2
+      exit 2
+      ;;
+  esac
 done
 
 
@@ -228,6 +251,8 @@ Available subcommands are:
     show info for the named file in queriy-file format
   u[pload] <filenames>...
     upload a bunch of files
+  m[odify] <fileid>
+    modify metatada for the given file
   d[elete] <fileid>
     delete the given file, and return a list of those remaining
   g[et] <fileid>
@@ -365,6 +390,13 @@ elif [[ $cmd =~ ^f ]]; then
       done
       rawout=true # XXX because of bug in API
       ;;
+    m*)
+      url+="/update"
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify fileid"
+      posts['fid']=${args[1]}
+      jqproc='.[0]'
+      table=true
+      ;;
     d*)
       [[ ${#args[@]} -eq 2 ]] || subhelp "must specify fileid"
       url+="/delete"
@@ -416,9 +448,9 @@ rawout=${rawout-${opts[r]-false}}
 unset -v 'opts[r]'
 
 if [[ -v opts[d] ]]; then
-  unset -v 'opts[d]'
   rawout=true
   outdir=${opts[d]}
+  unset -v 'opts[d]'
   if [[ -e $outdir ]]; then
     if [[ ! -d $outdir ]]; then
       echo "ERROR: $outdir must name a directory for output" >&2
@@ -498,7 +530,7 @@ function maybecurl {
   if $configonly; then
     savetemp=true
     echo "Config file written to stdout; use with curl directly or with $0 manual" >&2
-    if $outdir; then
+    if [[ -v outdir ]]; then
       echo "The output will be a binary .tar.gz file" >&2
     elif ! $rawout; then
       echo "Pipe output to the command" >&2
@@ -522,7 +554,7 @@ function maybecurl {
           cat
         ) | (
           if [[ $table = 'true' ]]; then
-            jq -r 'to_entries | .[] | .key + "|" + (.value | tostring)' | column -ts'|'
+            jq -r 'to_entries | .[] | (.key | tostring) + "|" + (.value | tostring)' | column -ts'|'
           else
             cat
           fi
