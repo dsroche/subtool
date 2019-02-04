@@ -10,7 +10,7 @@ defurlbase="http://submit.cs.usna.edu/api"
 
 # listing all option flags
 opt0arg=srh
-opt1arg=kqupfjd
+opt1arg=kqupfgjd
 
 ### general usage ####
 function usage {
@@ -23,6 +23,7 @@ Available commands:
   p[roject]
   f[iles] (for test cases)
   t[estcase]
+  s[ubmission]
   m[anual]
   i[nternal] (undocumented stuff)
   h[elp]
@@ -53,7 +54,7 @@ function genopts {
     run that using the \"manual\" command
   -p <name>=<value>
     Specify a POST value to be sent along with the query
-    Typical ones: course, apikey, project
+    Typical ones: course, apikey, project, user
   -f <filename>
     Specify a file to be sent along with the query.
     \"-\" means to use stdin
@@ -259,7 +260,7 @@ while true; do
       unset -v 'arr'
       ;;
     p)
-      posts["${2%%=*}"]=${2#*=}
+      posts["${optarg%%=*}"]=${optarg#*=}
       ;;
     f)
       if [[ $optarg = "-" ]]; then
@@ -363,6 +364,15 @@ Options:"
       echo "\
 Usage: $0 t[estcase] [<subcommand> [<tid>]] [<options>]
 
+Example: $0 testcase create -q- <<END
+rulename easy
+stdin <<STOPIN
+input is
+on multiple lines
+STOPIN
+outvalue output on a single line
+END
+
 Available subcommands are:
   l[ist]        : list all test cases for current project (default)
                   testcases are one per line as \"<tid> <rulename>\"
@@ -372,6 +382,30 @@ Available subcommands are:
   d[elete] <tid>: delete existing testcase
 course and project must be specified for every subcommand.
 Results are displayed in query-file format.
+
+Options:"
+      genopts
+      ;;
+    s*)
+      echo "\
+Usage: $0 s[ubmission] [<subcommand> <filenames>...] [<options>]
+
+Available subcommands are:
+  l[ist]: list most recent submissions from all users (default)
+          Output lines are formatted \"<sid> <user> <points> <date> <time>\"
+  u[ser] <user>: list all submissions for that user
+  s[ubmit] <files>...
+      upload files for submission
+      Default is as yourself, or specify another user via -p
+  g[et] <user>
+      Download tar.gz of a single submission (see -d option)
+      Specify sid via -p to get a not-most-recent submission.
+
+course and project must be speficied for all subcommands.
+
+Example: $0 submission list
+         $0 submission submit file1.c file2.txt -p user=m999999
+         $0 submission get m999999 -d midsub
 
 Options:"
       genopts
@@ -565,6 +599,41 @@ elif [[ $cmd =~ ^t ]]; then
       subhelp "unrecognized subcommand"
       ;;
   esac
+elif [[ $cmd =~ ^s ]]; then
+  #### SUBMISSION ####
+  url="submission"
+  subcmd=${args[0]-'list'}
+  case "$subcmd" in
+    l*)
+      [[ ${#args[@]} -ge 2 ]] && subhelp "too many arguments"
+      url+="/recent"
+      jqproc='.[] | ((.sid | tostring) + " " + .user + " " + (.points | tostring) + " " + .datestamp)'
+      blankok=true
+      ;;
+    u*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify user"
+      url+="/list"
+      posts['user']=${args[1]}
+      jqproc='.[] | ((.sid | tostring) + " " + .user + (.points | tostring) + .datestamp)'
+      blankok=true
+      ;;
+    s*)
+      url+="/upload"
+      for (( i = 1; i < ${#args[@]}; i++ )); do
+        add2tar "${args[i]}"
+      done
+      rawout=true # XXX because of bug in API
+      ;;
+    g*)
+      [[ ${#args[@]} -eq 2 ]] || subhelp "must specify user"
+      url+='/pull'
+      posts['user']=${args[1]}
+      rawout=true
+      ;;
+    *)
+      subhelp "unrecognized subcommand"
+      ;;
+  esac
 elif [[ $cmd =~ ^i ]]; then
   if [[ ${#args[@]} -lt 1 ]]; then
     exit 2
@@ -713,7 +782,6 @@ function maybecurl {
         ) | (
           if [[ $table = 'true' ]]; then
             json2query
-            #jq -r 'to_entries | .[] | (.key | tostring) + "|" + (.value | tostring)' | column -ts'|'
           else
             cat
           fi
