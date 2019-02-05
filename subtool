@@ -433,7 +433,11 @@ if [[ ${#configs[@]} -eq 0 ]]; then
     if [[ -r $curdir ]]; then
       for f in ".subtoolrc" "subtoolrc"; do
         if [[ -r "$curdir/$f" ]]; then
-          configs+=( "$reldir$f" )
+          if [[ -r "$reldir$f" ]]; then
+            configs+=( "$reldir$f" )
+          else
+            configs+=( "$curdir/$f" )
+          fi
         fi
       done
     fi
@@ -732,10 +736,13 @@ function confline {
 
 # helper function to add POST form parameters to config file
 function formline {
-  if [[ $1 = 'file' && $2 =~ ^[@] ]]; then
-    confline 'form' "$1=@\"${2:1}\""
+  local val=$2
+  val=${val//\\/\\\\}
+  val=${val//\"/\\\"}
+  if [[ $1 = 'file' && $val =~ ^[@] ]]; then
+    confline 'form' "$1=@\"${val:1}\""
   else
-    confline 'form' "$1=\"$2\""
+    confline 'form' "$1=\"$val\""
   fi
 }
 
