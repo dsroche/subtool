@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+
+set -e
+set -u
+shopt -s nullglob
+
+srcdir=$(dirname "$(readlink -f "$0")")
+
+function usage {
+  echo "\
+Usage: $0 <subcases_options> <files>... <subtool_options>
+
+This frontent to subtool runs and uploads test cases based
+on test case configuration files as specified on the command line.
+
+An apikey, course, and project name are all required to be
+sent to subtool either via -p options or config files; see
+\"subtool -h\" for more details.
+
+Available <subfiles_options> are:
+  -r
+    Run testcases and display the results; do not upload anything.
+  -t <testcase>
+    Run or (re)-upload this testcase only
+  -d <directory>
+    Save per-case config files to this directory instead of uploading
+  -h
+    Display this help and exit"
+  [[ $# -eq 1 ]] && exit $1
+}
+
+
+#### create a temp folder which is removed on exit ####
+tempdir=$(mktemp --tmpdir -d subfilesXXXXXXXX)
+chmod 700 "$tempdir"
+
+function cleanup {
+  rm -rf "$tempdir"
+  return 0
+}
+
+trap cleanup EXIT
+
+
+#### parse command line arguments ####
+runonly=false
+dironly=false
+allrules=true
+declare -A rules=()
+
+curopt="" # leftover options, used in the loop
+while true; do
+  while [[ -z $curopt && $# -ge 1 && ${1:0:1} = '-' ]]; do
+    curopt=${1:1}
+    shift
+  done
+  [[ -n $curopt ]] || break
+
+  oname=${curopt:0:1} # letter for this option
+  curopt=${curopt:1} # the rest of the argument, other options or an argument
+
+  if [[ $oname =~ [td] ]]; then
+    # if option takes an argument, assign it
+    if [[ -n $curopt ]]; then
+      optarg=$curopt
+      curopt=''
+    elif [[ $# -ge 1 ]]; then
+      optarg=$1
+      shift
+    else
+      echo "ERROR: option -$oname needs an argument" >&2
+      exit 2
+    fi
+  fi
+
+  case $oname in
+    r)
+      runonly=true
+      ;;
+    t)
+      rules["$optarg"]=true
+      allrules=false
+      ;;
+    d)
+      ddir=$optarg
+      if [[ ! -e $ddir ]]; then
+        mkdir -v "$ddir"
+      elif [[ ! -d $ddir ]]; then
+        echo "ERROR: $ddir exists and is not a directory" >&2
+        exit 3
+      fi
+      ;;
+    h)
+      usage 0
+      ;;
+    *)
+      usage 2
+      ;;
+  esac
+  unset -v 'oname'
+  unset -v 'optarg'
+done
+unset -v 'curopt'
+
+if $runonly && [[ -v ddir ]]; then
+  echo "ERROR: -r and -d options are incompatible" >&2
+  exit 2
+fi
+
+tcfiles=()
+while [[ $# -ge 1 && ( $1 = '-' || ${1:0:1} != '-' ) ]]; do
+  if [[ $1 = '-' ]]; then
+    tcfiles+=( '/dev/stdin' )
+  elif [[ -r $1 ]]; then
+    tcfiles+=( "$1" )
+  else
+    echo "ERROR: cannot read test case file \"$1\"" >&2
+    exit 3
+  fi
+  shift
+done
+
+if [[ ${#tcfiles[@]} -eq 0 ]]; then
+  tcfiles+=( '/dev/stdin' )
+fi
+
+
+#### get current testcase ids ####
+
+if ! $runonly; then
+  echo "Fetching current testcase ids..."
+  declare -A tcids=()
+  exec 4< <(subtool testcase list "$@")
+  while read -u4 tid rule; do
+    tcids["$rule"]=$tid
+  done
+  exec 4<&-
+  unset -v 'tid'
+  unset -v 'rule'
+fi
+
+
+#### process testcase files ####
+
+for tcf in "${tcfiles[@]}"; do
+  echo "Processing $tcf..."
+  exec 4<"$tcf"
+
+  ## general options at the top of the file
+  declare -A genopts=()
+  while read -u4 -r name val; do
+    [[ $name =~ ^[~] ]] && break
+    if [[ ${val:0:2} == "<<" ]]; then
+      bstr=$(sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//' -e "s/^['\"]\(.*\)['\"]$/\1/" <<<"${val:2}")
+      val=''
+      fst=true
+      while IFS='' read -u4 -r line && [[ $line != $bstr ]]; do
+        if $fst; then
+          fst=false
+        else
+          val+="
+"
+        fi
+        val+="$line"
+      done
+      genopts["$name"]="$val"
+    else
+      genopts["$name"]="$val"
+    fi
+  done
+
+  ## each new rule starts with ~~~~
+  while [[ $name =~ ^[~] ]]; do
+    rulename=${val%% *}
+    declare -A ruleopts=()
+
+    ## copy general options
+    for name in "${!genopts[@]}"; do
+      ruleopts["$name"]=${genopts["$name"]}
+    done
+
+    ## read additional rule options
+    while read -u4 -r name val; do
+      [[ $name =~ ^[~] ]] && break
+      if [[ ${val:0:2} == "<<" ]]; then
+        bstr=$(sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//' -e "s/^['\"]\(.*\)['\"]$/\1/" <<<"${val:2}")
+        val=''
+        fst=true
+        while IFS='' read -u4 -r line && [[ $line != $bstr ]]; do
+          if $fst; then
+            fst=false
+          else
+            val+="
+"
+          fi
+          val+="$line"
+        done
+        ruleopts["$name"]="$val"
+      else
+        ruleopts["$name"]="$val"
+      fi
+    done
+
+    if ! ${rules["$rulename"]-$allrules}; then
+      # skip rule if not requested
+      continue
+    fi
+
+    echo
+    echo "Compiling $rulename..."
+    set +e
+    make ${ruleopts['compile_target']-'compile'}
+    set -e
+
+    if $runonly; then
+      echo "Running $rulename..."
+      set +e
+      make ${ruleopts['run_target']-'run'} <<<"${ruleopts['stdin']-}"
+      echo "Exit code: $?"
+      set -e
+      continue
+    fi
+
+    ## get command output
+    if [[ -v ruleopts['outvalue'] ]]; then
+      echo "Not running; outvalue already set"
+    else
+      echo -n "Running $rulename..."
+      set +e
+      outvalue=$(make ${ruleopts['run_target']-'run'} 2>/dev/null <<<"${ruleopts['stdin']-}")
+      ecode=$?
+      set -e
+      echo " exit $ecode"
+      source=${ruleopts['source']-'Output'}
+      if [[ $source = 'Output' ]]; then
+        :
+      elif [[ $source = 'Return code' ]]; then
+        outvalue=$ecode
+      else
+        echo "ERROR: invalid source $source; aborting"
+        exit 3
+      fi
+      ruleopts['outvalue']=$outvalue
+    fi
+
+    echo "Uploading $rulename..."
+    (
+      echo "rulename $rulename"
+      for fn in "${!ruleopts[@]}"; do
+        echo -n "$fn "
+        val=${ruleopts["$fn"]}
+        if [[ $val =~ "
+" ]]; then
+          bstr=END
+          while [[ $val =~ $bstr ]]; do
+            bstr+=D
+          done
+          echo "<<$bstr"
+          echo "$val"
+          echo "$bstr"
+        else
+          echo "$val"
+        fi
+      done
+    ) | (
+      if [[ -v ddir ]]; then
+        exec 5>"$ddir/$rulename.txt"
+        if [[ -v tcids["$rulename"] ]]; then
+          echo "tid ${tcids["$rulename"]}" >&5
+        fi
+        cat >&5
+        exec 5>&-
+      elif [[ -v tcids["$rulename"] ]]; then
+        subtool testcase modify "${tcids["$rulename"]}" -q- "$@" >/dev/null
+      else
+        subtool testcase create -q- "$@" >/dev/null
+      fi
+    )
+  done
+done

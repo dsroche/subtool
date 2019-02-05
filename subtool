@@ -28,7 +28,7 @@ Available commands:
   i[nternal] (undocumented stuff)
   h[elp]
 
-Most command require an apikey and course to be specified, either
+Most commands require an apikey and course to be specified, either
 using -p or in a config file. Many commands also require a project.
 
 Options (may be more for specific commands):"
@@ -75,28 +75,17 @@ function genopts {
 #### helper functions to convert between query file format and a single json object
 function query2arr {
   # assigns query on filedes 5 to associative array "arr"
-  local name val bstr line f2
+  local name val bstr line
   while read -u5 -r name val; do
     if [[ ${val:0:2} == "<<" ]]; then
       bstr=$(sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//' -e "s/^['\"]\(.*\)['\"]$/\1/" <<<"${val:2}")
       val=''
-      f2=true
-      while IFS='' read -r line && [[ $line != $bstr ]]; do
-        if $f2; then
-          f2=false
-        else
-          val+="\\n"
-        fi
-        line=${line//\\/\\\\}
-        line=${line//\"/\\\"}
-        line=${line//	/\\t}
-        val+="$line"
+      while IFS='' read -u5 -r line && [[ $line != $bstr ]]; do
+        val+="$line
+"
       done
       arr["$name"]="$val"
     else
-      val=${val//\\/\\\\}
-      val=${val//\"/\\\"}
-      val=${val//	/\\t}
       arr["$name"]="$val"
     fi
   done
@@ -191,11 +180,13 @@ declare -A posts
 files2tar=()
 
 function add2tar {
-  if [[ ! -r $1 ]]; then
+  local fcanon
+  if fcanon=$(readlink -e "$1"); then
+    files2tar+=( "$fcanon" )
+  else
     echo "ERROR: cannot read tarball file $1" >&2
     exit 3
   fi
-  files2tar+=( "$1" )
   return 0
 }
 
@@ -265,8 +256,11 @@ while true; do
     f)
       if [[ $optarg = "-" ]]; then
         posts['file']="@$(copyin)"
+      elif fcanon=$(readlink -e "$optarg"); then
+        posts['file']="@$fcanon"
       else
-        posts['file']="@$optarg"
+        echo "ERROR: cannot read file \"$optarg\"" >&2
+        exit 3
       fi
       ;;
     g)
@@ -525,10 +519,11 @@ elif [[ $cmd =~ ^f ]]; then
       ;;
     u*)
       url+="/upload"
+      posts['json']='1'
+      alljq='.message'
       for (( i = 1; i < ${#args[@]}; i++ )); do
         add2tar "${args[i]}"
       done
-      rawout=true # XXX because of bug in API
       ;;
     m*)
       url+="/update"
@@ -619,10 +614,11 @@ elif [[ $cmd =~ ^s ]]; then
       ;;
     s*)
       url+="/upload"
+      posts['json']='1'
+      alljq='.message'
       for (( i = 1; i < ${#args[@]}; i++ )); do
         add2tar "${args[i]}"
       done
-      rawout=true # XXX because of bug in API
       ;;
     g*)
       [[ ${#args[@]} -eq 2 ]] || subhelp "must specify user"
@@ -728,12 +724,19 @@ function confline {
   local res=$2
   res=${res//\\/\\\\}
   res=${res//\"/\\\"}
+  res=${res//
+/\\n}
+  #res=${res//	/\\t}
   echo "$1 = \"$res\"" >&4
 }
 
 # helper function to add POST form parameters to config file
 function formline {
-  confline "form" "$1=$2"
+  if [[ $1 = 'file' && $2 =~ ^[@] ]]; then
+    confline 'form' "$1=@\"${2:1}\""
+  else
+    confline 'form' "$1=\"$2\""
+  fi
 }
 
 for cfile in "${configs[@]}"; do
@@ -752,52 +755,46 @@ fi
 #### close the config file and run curl already! ####
 exec 4>&-
 
-function maybecurl {
-  alljq=".results | values${jqproc:+" | $jqproc"}"
-  if $configonly; then
-    savetemp=true
-    echo "Config file written to stdout; use with curl directly or with $0 manual" >&2
-    if [[ -v outdir ]]; then
-      echo "The output will be a binary .tar.gz file" >&2
-    elif ! $rawout; then
-      echo "Pipe output to the command" >&2
-      echo "  jq -r ${alljq@Q}" >&2
-    fi
-    return 0
-  else
-    set +e
-    $CURL -K "$curconfig" | (
-      if $rawout; then
-        if [[ -v outdir ]]; then
-          cd "$outdir"
-          tar -x -z -v -k -f-
+[[ -v alljq ]] || alljq=".results | values${jqproc:+" | $jqproc"}"
+if $configonly; then
+  savetemp=true
+  echo "Config file written to stdout; use with curl directly or with $0 manual" >&2
+  if [[ -v outdir ]]; then
+    echo "The output will be a binary .tar.gz file" >&2
+  elif ! $rawout; then
+    echo "Pipe output to the command" >&2
+    echo "  jq -r ${alljq@Q}" >&2
+  fi
+  exit 0
+else
+  set +e
+  $CURL -K "$curconfig" | (
+    if $rawout; then
+      if [[ -v outdir ]]; then
+        cd "$outdir"
+        tar -x -z -v -k -f-
+      else
+        cat
+      fi
+    else
+      # TODO remove next line when API is fixed
+      sed 's/$/\\n/' | tr -d '\n\t' | sed 's/\\n$//' | \
+      jq -r ".status, if (.status == 1) then ($alljq) else .message end" | (
+        read oz
+        [[ $oz -eq 1 ]] || exec 1>&2
+        cat
+      ) | (
+        if [[ $table = 'true' ]]; then
+          json2query
         else
           cat
         fi
-      else
-        jq -r ".status, if (.status == 1) then ($alljq) else .message end" | (
-          read oz
-          [[ $oz -eq 1 ]] || exec 1>&2
-          cat
-        ) | (
-          if [[ $table = 'true' ]]; then
-            json2query
-          else
-            cat
-          fi
-        ) | (
-          $blankok && cat || grep ''
-        )
-      fi
-    )
-    ret=$?
-    set -e
-    return $ret
-  fi
-}
-
-maybecurl
-
-# XXX
-# sshcurl -K cconf http://submit.cs.usna.edu/api/project/list | jq -r '.results[].project'
-# jq -r '.results[] | select(.project == "lab2") | to_entries | .[] | .key + "," + (.value | tostring)' 
+      ) | (
+        $blankok && cat || grep ''
+      )
+    fi
+  )
+  ret=$?
+  set -e
+  exit $ret
+fi

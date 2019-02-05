@@ -83,6 +83,7 @@ while true; do
 done
 unset -v 'curopt'
 
+#### gather list of files ####
 declare -A newfiles=()
 while [[ $# -ge 1 && ${1:0:1} != '-' ]]; do
   if [[ -d $1 ]]; then
@@ -107,6 +108,7 @@ while [[ $# -ge 1 && ${1:0:1} != '-' ]]; do
   shift
 done
 
+#### check in case no files listed ####
 if [[ ${#newfiles[@]} -eq 0 ]]; then
   if $delete; then
     yn=""
@@ -135,6 +137,8 @@ exec 4<&-
 unset -v 'fid'
 unset -v 'fname'
 
+
+#### divide into three groups ####
 justold=()
 justnew=()
 oldnew=()
@@ -165,6 +169,7 @@ if $delete; then
   else
     echo "No old files to delete"
   fi
+  exit 0
 fi
 
 
