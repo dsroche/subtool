@@ -181,6 +181,7 @@ for tcf in "${tcfiles[@]}"; do
 
     ## read additional rule options
     while read -u4 -r name val; do
+      [[ -z $name || $name =~ ^[#] ]] && continue
       [[ $name =~ ^[~] ]] && break
       if [[ ${val:0:2} == "<<" ]]; then
         bstr=$(sed -e 's/^[[:blank:]]*//' -e 's/[[:blank:]]*$//' -e "s/^['\"]\(.*\)['\"]$/\1/" <<<"${val:2}")
