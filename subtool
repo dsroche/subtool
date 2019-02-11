@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-set -e
-set -u
+set -euo pipefail
 shopt -s nullglob
 
 CURL=${CURL-curl} # allow to specify an alternate command for curl
@@ -55,7 +54,7 @@ function genopts {
   -p <name>=<value>
     Specify a POST value to be sent along with the query
     Typical ones: course, apikey, project, user
-  -f <filename>
+  -f <name>=<filename>
     Specify a file to be sent along with the query.
     \"-\" means to use stdin
   -g <filename>
@@ -175,8 +174,9 @@ function copyin {
 cmd=""
 args=()
 configs=()
-declare -A opts
-declare -A posts
+declare -A opts=()
+declare -A posts=()
+declare -A pfiles=()
 files2tar=()
 
 function add2tar {
@@ -254,14 +254,24 @@ while true; do
       posts["${optarg%%=*}"]=${optarg#*=}
       ;;
     f)
-      if [[ $optarg = "-" ]]; then
-        posts['file']="@$(copyin)"
-      elif fcanon=$(readlink -e "$optarg"); then
-        posts['file']="@$fcanon"
+      posname=${optarg%%=*}
+      posfile=${optarg#*=}
+      if [[ $posfile = "-" ]]; then
+        posts["$posname"]="-"
+      elif fcanon=$(readlink -e "$posfile"); then
+        posts["$posname"]="$fcanon"
       else
-        echo "ERROR: cannot read file \"$optarg\"" >&2
+        echo "ERROR: cannot read file \"$posfile\"" >&2
         exit 3
       fi
+      if [[ $posname = 'file' ]]; then
+        pfiles["$posname"]='@'
+      else
+        pfiles["$posname"]='<'
+      fi
+      unset -v 'posname'
+      unset -v 'posfile'
+      unset -v 'fcanon'
       ;;
     g)
       add2tar "$optarg"
@@ -427,9 +437,13 @@ fi
 
 #### search for config files in parent directories ####
 if [[ ${#configs[@]} -eq 0 ]]; then
+  sawhome=false
   curdir=$(pwd)
   reldir=""
   while [[ -n $curdir && $curdir != "/" ]]; do
+    if [[ $(readlink -f "$curdir") = $HOME ]]; then
+      sawhome=true
+    fi
     if [[ -r $curdir ]]; then
       for f in ".subtoolrc" "subtoolrc"; do
         if [[ -r "$curdir/$f" ]]; then
@@ -444,6 +458,16 @@ if [[ ${#configs[@]} -eq 0 ]]; then
     curdir=$(dirname "$curdir")
     reldir="../$reldir"
   done
+  if ! $sawhome; then
+    for f in ".subtoolrc" "subtoolrc"; do
+      if [[ -r "$HOME/$f" ]]; then
+        configs+=( "$HOME/$f" )
+      fi
+    done
+  fi
+  unset -v "sawhome"
+  unset -v "curdir"
+  unset -v "reldir"
 fi
 
 
@@ -482,7 +506,7 @@ if [[ $cmd =~ ^p ]]; then
   case "$subcmd" in
     l*)
       url+="/list"
-      jqproc='.[] | (.pid | tostring) + " " + .project'
+      jqproc='.[] | (.pid | tostring) + " " + .project + " " + .title'
       ;;
     i*)
       url+='/list'
@@ -715,7 +739,8 @@ if [[ ${#files2tar[@]} -gt 0 ]]; then
   pushd "$td" >/dev/null
   tar czf "$tb" *
   popd >/dev/null
-  posts['file']="@$tb"
+  posts['file']="$tb"
+  pfiles['file']='@'
 fi
 
 for badopt in ${!opts[@]}; do
@@ -737,11 +762,11 @@ function confline {
 # helper function to add POST form parameters to config file
 function formline {
   local val=$2
-  val=${val//\\/\\\\}
-  val=${val//\"/\\\"}
-  if [[ $1 = 'file' && $val =~ ^[@] ]]; then
-    confline 'form' "$1=@\"${val:1}\""
+  if [[ $# -ge 3 && -n $3 ]]; then
+    confline 'form' "$1=$3$val"
   else
+    val=${val//\\/\\\\}
+    val=${val//\"/\\\"}
     confline 'form' "$1=\"$val\""
   fi
 }
@@ -751,7 +776,7 @@ for cfile in "${configs[@]}"; do
 done
 
 for pname in "${!posts[@]}"; do
-  formline "$pname" "${posts["$pname"]}"
+  formline "$pname" "${posts["$pname"]}" ${pfiles["$pname"]-}
 done
 
 if [[ -v url ]]; then
@@ -788,8 +813,12 @@ else
       sed 's/$/\\n/' | tr -d '\n\t' | sed 's/\\n$//' | \
       jq -r ".status, if (.status == 1) then ($alljq) else .message end" | (
         read oz
-        [[ $oz -eq 1 ]] || exec 1>&2
-        cat
+        if [[ $oz -ne 1 ]]; then
+          cat >&2
+          exit 1
+        else
+          cat
+        fi
       ) | (
         if [[ $table = 'true' ]]; then
           json2query
