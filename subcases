@@ -207,18 +207,54 @@ for tcf in "${tcfiles[@]}"; do
       continue
     fi
 
+    testsource=${ruleopts['source']-'Output'}
+    unset cfile
+    unset saveout
+    if [[ $testsource = 'Output' ]]; then
+      saveout='out'
+    elif [[ $testsource = 'Return code' ]]; then
+      saveout='ret'
+    elif [[ $testsource = 'Created File' ]]; then
+      saveout='file'
+      if [[ -v ruleopts['sourcefile'] ]]; then
+        cfile=${ruleopts['sourcefile']}
+      else
+        echo "ERROR: need sourcefile when 'source' is 'Created File'"
+        exit 3
+      fi
+    else
+      echo "ERROR: invalid source '$testsource'"
+      exit 3
+    fi
+
     echo
     echo "Compiling $rulename..."
     set +e
     make ${ruleopts['compile_target']-'compile'}
     set -e
 
+
     if $runonly; then
       echo "Running $rulename..."
       set +e
       make ${ruleopts['run_target']-'run'} <<<"${ruleopts['stdin']-}"
-      echo "Exit code: $?"
+      ecode=$?
       set -e
+      echo "Exit code: $ecode"
+      if [[ $saveout = 'file' ]]; then
+        if [[ ! -e $cfile ]]; then
+          echo "ERROR: no file '$cfile' created"
+          exit 5
+        fi
+        echo "Created file:"
+        cat "$cfile"
+        rm -f "$cfile"
+        echo
+      fi
+      if [[ $ecode -ne 0 && $saveout != 'ret' ]]; then
+        echo "ERROR: must exit zero unless 'source' is 'Return code'"
+        exit 5
+      fi
       continue
     fi
 
@@ -232,14 +268,19 @@ for tcf in "${tcfiles[@]}"; do
       ecode=$?
       set -e
       echo " exit $ecode"
-      source=${ruleopts['source']-'Output'}
-      if [[ $source = 'Output' ]]; then
-        :
-      elif [[ $source = 'Return code' ]]; then
+      if [[ $saveout = 'file' ]]; then
+        if [[ ! -e $cfile ]]; then
+          echo "ERROR: no file '$cfile' created"
+          exit 5
+        fi
+        outvalue=$(cat "$cfile")
+        rm -f "$cfile"
+      fi
+      if [[ $saveout = 'ret' ]]; then
         outvalue=$ecode
-      else
-        echo "ERROR: invalid source $source; aborting"
-        exit 3
+      elif [[ $ecode -ne 0 ]]; then
+        echo "ERROR: must exit zero unless 'source' is 'Return code'"
+        exit 5
       fi
       ruleopts['outvalue']=$outvalue
     fi
