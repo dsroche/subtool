@@ -5,8 +5,8 @@ shopt -s nullglob
 
 CURL=${CURL-curl} # allow to specify an alternate command for curl
 srcdir=$(dirname "$(readlink -f "$0")")
-#defurlbase="http://submit.cs.usna.edu/api"
-defurlbase="https://submit.moboard.com/api"
+defurlbase="http://submit.cs.usna.edu/api"
+#defurlbase="https://submit.moboard.com/api"
 
 # listing all option flags
 opt0arg=srh
