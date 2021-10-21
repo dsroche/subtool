@@ -181,7 +181,7 @@ if [[ ${#justnew[@]} -gt 0 ]]; then
     toup+=( "${newfiles[$fname]}" )
   done
   unset -v 'fname'
-  subtool file upload "${toup[@]}" "$@"
+  subtool file upload "$@" "${toup[@]}"
   unset -v 'toup'
 else
   echo "No new files to upload"
