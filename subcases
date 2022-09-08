@@ -233,13 +233,23 @@ for tcf in "${tcfiles[@]}"; do
     make ${ruleopts['compile_target']-'compile'}
     set -e
 
+    infile="$tempdir/infile.txt"
+    if [[ -n ${ruleopts['stdin']} ]]; then
+      echo "${ruleopts['stdin']}" >"$infile"
+    else
+      >"$infile"
+    fi
 
     if $runonly; then
       echo "Running $rulename..."
+      exec 6> >(sed 's/^/STDERR: /')
+      exec 7> >(sed 's/^/OUT: /')
       set +e
-      make ${ruleopts['run_target']-'run'} <<<"${ruleopts['stdin']-}"
+      make ${ruleopts['run_target']-'run'} <"$infile" 2>&6 >&7
       ecode=$?
       set -e
+      exec 6>&-
+      exec 7>&-
       echo "Exit code: $ecode"
       if [[ $saveout = 'file' ]]; then
         if [[ ! -e $cfile ]]; then
@@ -263,10 +273,14 @@ for tcf in "${tcfiles[@]}"; do
       echo "Not running; outvalue already set"
     else
       echo -n "Running $rulename..."
+
+      echo "${ruleopts['stdin']-}"
+      exec 6> >(sed 's/^/STDERR: /')
       set +e
-      outvalue=$(make ${ruleopts['run_target']-'run'} 2>/dev/null <<<"${ruleopts['stdin']-}")
+      outvalue=$(make ${ruleopts['run_target']-'run'} 2>/dev/null <"$infile" 2>&6)
       ecode=$?
       set -e
+      exec 6>&-
       echo " exit $ecode"
       if [[ $saveout = 'file' ]]; then
         if [[ ! -e $cfile ]]; then
