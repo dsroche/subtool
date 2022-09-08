@@ -234,7 +234,7 @@ for tcf in "${tcfiles[@]}"; do
     set -e
 
     infile="$tempdir/infile.txt"
-    if [[ -n ${ruleopts['stdin']} ]]; then
+    if [[ -v 'ruleopts[stdin]' && -n ${ruleopts['stdin']} ]]; then
       echo "${ruleopts['stdin']}" >"$infile"
     else
       >"$infile"
