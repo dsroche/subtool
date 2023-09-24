@@ -10,7 +10,7 @@ function usage {
   echo "\
 Usage: $0 <subfiles_options> <files>... <subtool_options>
 
-This frontent to subtool adds, removes, or updates the files
+This frontend to subtool adds, removes, or updates the files
 mixed with student code for testing purposes.
 
 An apikey, course, and project name are all required to be
@@ -193,6 +193,16 @@ if $delete; then
   else
     echo "No old files to delete"
   fi
+  # delete directories
+  # subtool manual testfile/list "$@" >"$finfo"
+  exec 4< <(jq -r '.[] | ((.fid | tostring) + " " + .filename)' "$finfo")
+  while read -u4 fid fname; do
+    [[ ${fname: -1} != '/' ]] && continue # skip non-directories
+    echo "deleting directory $fname..."
+    subtool file delete "$fid" $stopts "$@" >/dev/null
+  done
+  exec 4<&-
+  unset -v fid fname
   exit 0
 fi
 
@@ -258,16 +268,5 @@ else
   echo "all pre-existing files were up to date"
 fi
 unset -v 'toup'
-
-#### get ids of directories ####
-subtool manual testfile/list "$@" >"$finfo"
-exec 4< <(jq -r '.[] | ((.fid | tostring) + " " + .filename)' "$finfo")
-while read -u4 fid fname; do
-  [[ ${fname: -1} != '/' ]] && continue # skip non-directories
-  echo "deleting directory $fname..."
-  subtool file delete "$fid" $stopts "$@" >/dev/null
-done
-exec 4<&-
-unset -v fid fname
 
 :
