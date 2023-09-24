@@ -7,9 +7,10 @@ CURL=${CURL-curl} # allow to specify an alternate command for curl
 srcdir=$(dirname "$(readlink -f "$0")")
 defurlbase="https://submit.cs.usna.edu/api"
 #defurlbase="https://submit.moboard.com/api"
+cmdname=${0##*/}
 
 # listing all option flags
-opt0arg=srh
+opt0arg=srih
 opt1arg=kqupfgjd
 
 ### general usage ####
@@ -17,7 +18,7 @@ function usage {
   # output to stderr if this is an error message
   [[ $# -eq 1 && $1 -ne 0 ]] && exec 1>&2
   echo "\
-Usage: $0 <command> [<args>] [<options>]
+Usage: $cmdname <command> [<args>] [<options>]
 
 Available commands:
   p[roject]
@@ -67,6 +68,8 @@ function genopts {
     Return raw input, don't process through jq
   -d <folder>
     Download and extract a tar.gz into the specified folder
+  -i
+    For file or submission upload, include intermediate paths in uploaded file names
   -h
     Same as \"help\". Can be used in conjunction with specific commands"
 }
@@ -179,10 +182,11 @@ declare -A opts=()
 declare -A posts=()
 declare -A pfiles=()
 files2tar=()
+paths=0
 
 function add2tar {
   local fcanon
-  if fcanon=$(readlink -e "$1"); then
+  if fcanon=$(realpath -e --relative-to=. "$1"); then
     files2tar+=( "$fcanon" )
   else
     echo "ERROR: cannot read tarball file $1" >&2
@@ -277,6 +281,9 @@ while true; do
     g)
       add2tar "$optarg"
       ;;
+    i)
+      paths=1
+      ;;
     h)
       if [[ -n $cmd ]]; then
         if [[ ${#args[@]} -eq 0 ]]; then
@@ -311,7 +318,7 @@ elif [[ $cmd =~ ^h ]]; then
   else case "${args[0]}" in
     p*)
       echo "\
-Usage: $0 p[roject] [<subcommand>] [<options>]
+Usage: $cmdname p[roject] [<subcommand>] [<options>]
 
 Available subcommands are:
   l[ist]  : list all projects for the course (default)
@@ -324,16 +331,16 @@ course must be specified for every subcommand.
 project must be specified for all subcommands except \"all\".
 Results are displayed in query-file format.
 
-Example: $0 project info -p project=lab10 >lab10.txt
+Example: $cmdname project info -p project=lab10 >lab10.txt
          ... change lab10.txt as you like ...
-         $0 project modify -p project=lab10 -q lab10.txt
+         $cmdname project modify -p project=lab10 -q lab10.txt
 
 Options:"
       genopts
       ;;
     f*)
       echo "\
-Usage: $0 f[iles] [<subcommand> <filenames>...] [<options>]
+Usage: $cmdname f[iles] [<subcommand> <filenames>...] [<options>]
 
 Available subcommands are:
   l[ist]
@@ -357,19 +364,19 @@ Available subcommands are:
 
 course and project must be speficied for all subcommands.
 
-Example: $0 files list -p project=lab10
-         $0 files info file1.txt
-         $0 files upload file2.txt file3.txt -p project=lab10
-         $0 files all -p project=lab10 -d output_folder
+Example: $cmdname files list -p project=lab10
+         $cmdname files info file1.txt
+         $cmdname files upload file2.txt file3.txt -p project=lab10
+         $cmdname files all -p project=lab10 -d output_folder
 
 Options:"
       genopts
       ;;
     t*)
       echo "\
-Usage: $0 t[estcase] [<subcommand> [<tid>]] [<options>]
+Usage: $cmdname t[estcase] [<subcommand> [<tid>]] [<options>]
 
-Example: $0 testcase create -q- <<END
+Example: $cmdname testcase create -q- <<END
 rulename easy
 stdin <<STOPIN
 input is
@@ -393,7 +400,7 @@ Options:"
       ;;
     s*)
       echo "\
-Usage: $0 s[ubmission] [<subcommand> <filenames>...] [<options>]
+Usage: $cmdname s[ubmission] [<subcommand> <filenames>...] [<options>]
 
 Available subcommands are:
   l[ist]: list most recent submissions from all users (default)
@@ -408,21 +415,21 @@ Available subcommands are:
 
 course and project must be speficied for all subcommands.
 
-Example: $0 submission list
-         $0 submission submit file1.c file2.txt -p user=m999999
-         $0 submission get m999999 -d midsub
+Example: $cmdname submission list
+         $cmdname submission submit file1.c file2.txt -p user=m999999
+         $cmdname submission get m999999 -d midsub
 
 Options:"
       genopts
       ;;
     m*)
       echo "\
-Usage: $0 manual [<urlpath>] [<options>]
+Usage: $cmdname manual [<urlpath>] [<options>]
 
 Runs a query manually, as specified in config files and/or options.
 If <urlpath> is given, it is appended to the base url.
 
-Example: $0 manual users/list
+Example: $cmdname manual users/list
 
 Options:"
       genopts
@@ -486,7 +493,7 @@ fi
 # helper function for subcommands, relies on $cmd and $subcmd
 function subhelp {
   echo "ERROR: $1 in $cmd $subcmd" >&2
-  echo "Run \"$0 help $cmd\" for help." >&2
+  echo "Run \"$cmdname help $cmd\" for help." >&2
   exit 2
 }
 
@@ -734,14 +741,23 @@ if [[ ${#files2tar[@]} -gt 0 ]]; then
   td="$tempdir/_tarball"
   mkdir "$td"
   for f in "${files2tar[@]}"; do
-    cp -r "$f" "$td"/
+    if (( paths )) && [[ ${f%%/*} != '.' ]]; then
+      par="$td/${f%/*}"
+      mkdir -p "$par"
+      cp -r "$f" "$par"/
+      unset -v par
+    else
+      cp -r "$f" "$td"/
+    fi
   done
+  unset -v f
   tb=$(readlink -f "$tempdir/_files.tar.gz")
   pushd "$td" >/dev/null
-  tar czf "$tb" *
+  find . '!' -type d -printf '%P\0' | xargs -0 -x -n 1024 tar -czf "$tb"
   popd >/dev/null
   posts['file']="$tb"
   pfiles['file']='@'
+  unset -v tb
 fi
 
 for badopt in ${!opts[@]}; do
@@ -791,7 +807,7 @@ exec 4>&-
 [[ -v alljq ]] || alljq=".results | values${jqproc:+" | $jqproc"}"
 if $configonly; then
   savetemp=true
-  echo "Config file written to stdout; use with curl directly or with $0 manual" >&2
+  echo "Config file written to stdout; use with curl directly or with $cmdname manual" >&2
   if [[ -v outdir ]]; then
     echo "The output will be a binary .tar.gz file" >&2
   elif ! $rawout; then

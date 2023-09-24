@@ -23,6 +23,8 @@ Available <subfiles_options> are:
   -d
     Delete any files *not* named here.
     (e.g., with no <files>, delete all on the server)
+  -i
+    Include intermediate paths in uploaded file names
   -h
     Display this help and exit"
   [[ $# -eq 1 ]] && exit $1
@@ -52,6 +54,7 @@ function copyin {
 #### parse command line arguments ####
 delete=false
 update=false
+paths=0
 
 curopt="" # leftover options, used in the loop
 while true; do
@@ -71,6 +74,9 @@ while true; do
     u)
       update=true
       ;;
+    i)
+      paths=1
+      ;;
     h)
       usage 0
       ;;
@@ -83,28 +89,45 @@ while true; do
 done
 unset -v 'curopt'
 
+stopts=''
+(( paths )) && stopts+=' -i'
+
 #### gather list of files ####
 declare -A newfiles=()
 while [[ $# -ge 1 && ${1:0:1} != '-' ]]; do
-  if [[ -d $1 ]]; then
-    exec 4< <(find "$1" -mindepth 1)
+  arg=$(realpath -e --relative-to=. "$1")
+  if (( paths )) && [[ ${arg%%/*} != '..' ]]; then
+    usepref=1
+  else
+    usepref=0
+  fi
+  if [[ -d $arg ]]; then
+    exec 4< <(find "$arg" -mindepth 1 '!' -type d)
     while read -u4 fname; do
-      [[ -d $fname ]] && continue
       if [[ ! -r $fname ]]; then
         echo "ERROR: cannot read file \"$fname\"" >&2
         exec 4<&-
         exit
       fi
-      newfiles[$(basename "$fname")]=$fname
+      if (( usepref )); then
+        newfiles["$fname"]=$fname
+      else
+        newfiles["${fname##*/}"]=$fname
+      fi
     done
     exec 4<&-
     unset -v 'fname'
-  elif [[ -r $1 ]]; then
-    newfiles[$(basename "$1")]=$1
+  elif [[ -r $arg ]]; then
+    if (( usepref )); then
+      newfiles["$arg"]=$arg
+    else
+      newfiles["${arg##*/}"]=$arg
+    fi
   else
-    echo "ERROR: cannot read file \"$1\"" >&2
+    echo "ERROR: cannot read file \"$arg\"" >&2
     exit 3
   fi
+  unset -v arg usepref
   shift
 done
 
@@ -117,7 +140,7 @@ if [[ ${#newfiles[@]} -eq 0 ]]; then
     done
     unset -v 'yn'
   else
-    echo "ERROR: no files specified; abording" >&2
+    echo "ERROR: no files specified; aborting" >&2
     exit 2
   fi
 fi
@@ -131,6 +154,7 @@ finfo="$tempdir/_finfo"
 subtool manual testfile/list "$@" >"$finfo"
 exec 4< <(jq -r '.[] | ((.fid | tostring) + " " + .filename)' "$finfo")
 while read -u4 fid fname; do
+  [[ ${fname: -1} = '/' ]] && continue # skip directories
   oldfiles["$fname"]=$fid
 done
 exec 4<&-
@@ -163,7 +187,7 @@ if $delete; then
   if [[ ${#justold[@]} -gt 0 ]]; then
     echo "Deleting ${justold[@]}..."
     for fname in "${justold[@]}"; do
-      subtool file delete "${oldfiles[$fname]}" "$@" >/dev/null
+      subtool file delete "${oldfiles[$fname]}" $stopts "$@" >/dev/null
     done
     unset -v 'fname'
   else
@@ -181,7 +205,7 @@ if [[ ${#justnew[@]} -gt 0 ]]; then
     toup+=( "${newfiles[$fname]}" )
   done
   unset -v 'fname'
-  subtool file upload "$@" "${toup[@]}"
+  subtool file upload $stopts "$@" "${toup[@]}"
   unset -v 'toup'
 else
   echo "No new files to upload"
@@ -192,7 +216,7 @@ fi
 if $update && [[ ${#oldnew[@]} -gt 0 ]]; then
   echo "updating metadata for ${oldnew[@]}..."
   for fname in "${oldnew[@]}"; do
-    subtool file modify "${oldfiles[$fname]}" "$@" >/dev/null
+    subtool file modify "${oldfiles[$fname]}" $stopts "$@" >/dev/null
   done
   unset -v 'fname'
   exit 0
@@ -204,7 +228,7 @@ fi
 
 # if ! $update; then
 #   odir="$tempdir/old"
-#   subtool file all "$@" -d "$odir"
+#   subtool file all $stopts "$@" -d "$odir"
 # fi
 
 
@@ -214,7 +238,7 @@ echo "checking pre-existing files..."
 for fname in "${oldnew[@]}"; do
   # XXX: replace this line when the API bug for testfile/pull is fixed
   # if ! cmp -s "$odir/$fname" "${newfiles[$fname]}"; then
-  if ! subtool file get "${oldfiles[$fname]}" "$@" | cmp -s - "${newfiles[$fname]}"; then
+  if ! subtool file get "${oldfiles[$fname]}" $stopts "$@" | cmp -s - "${newfiles[$fname]}"; then
     toup+=( "$fname" )
   fi
 done
@@ -224,8 +248,8 @@ if [[ ${#toup[@]} -gt 0 ]]; then
   echo "re-uploading changed files ${toup[@]}..."
   for fname in "${toup[@]}"; do
     jq -r ".[] | select(.filename == \"$fname\") | to_entries | .[] | (.key | tostring) + \"|\" + (.value | tostring)" "$finfo" >"$qfile"
-    subtool file delete "${oldfiles[$fname]}" "$@" >/dev/null
-    subtool file upload "${newfiles[$fname]}" "$@" -q "$qfile"
+    subtool file delete "${oldfiles[$fname]}" $stopts "$@" >/dev/null
+    subtool file upload "${newfiles[$fname]}" $stopts "$@" -q "$qfile"
     rm -f "$qfile"
   done
   unset -v 'fname'
@@ -234,5 +258,16 @@ else
   echo "all pre-existing files were up to date"
 fi
 unset -v 'toup'
+
+#### get ids of directories ####
+subtool manual testfile/list "$@" >"$finfo"
+exec 4< <(jq -r '.[] | ((.fid | tostring) + " " + .filename)' "$finfo")
+while read -u4 fid fname; do
+  [[ ${fname: -1} != '/' ]] && continue # skip non-directories
+  echo "deleting directory $fname..."
+  subtool file delete "$fid" $stopts "$@" >/dev/null
+done
+exec 4<&-
+unset -v fid fname
 
 :
