@@ -741,7 +741,7 @@ if [[ ${#files2tar[@]} -gt 0 ]]; then
   td="$tempdir/_tarball"
   mkdir "$td"
   for f in "${files2tar[@]}"; do
-    if (( paths )) && [[ ${f%%/*} != '.' ]]; then
+    if (( paths )) && [[ ${f%%/*} != '..' ]]; then
       par="$td/${f%/*}"
       mkdir -p "$par"
       cp -r "$f" "$par"/
