@@ -95,7 +95,7 @@ stopts=''
 #### gather list of files ####
 declare -A newfiles=()
 while [[ $# -ge 1 && ${1:0:1} != '-' ]]; do
-  arg=$(realpath -e --relative-to=. "$1")
+  arg=$(realpath -se --relative-to=. "$1")
   if (( paths )) && [[ ${arg%%/*} != '..' ]]; then
     usepref=1
   else
@@ -136,8 +136,10 @@ if [[ ${#newfiles[@]} -eq 0 ]]; then
   if $delete; then
     yn=""
     while [[ ! $yn =~ [yn] ]]; do
-      read -n1 -p "WARNING: all existing files will be deleted. Continue? [y/n]" yn
+      read -n1 -p "WARNING: all existing files will be deleted. Continue? [y/n] " yn
+      echo
     done
+    [[ $yn = y ]] || exit 1
     unset -v 'yn'
   else
     echo "ERROR: no files specified; aborting" >&2

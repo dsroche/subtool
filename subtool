@@ -186,7 +186,7 @@ paths=0
 
 function add2tar {
   local fcanon
-  if fcanon=$(realpath -e --relative-to=. "$1"); then
+  if fcanon=$(realpath -se --relative-to=. "$1"); then
     files2tar+=( "$fcanon" )
   else
     echo "ERROR: cannot read tarball file $1" >&2
@@ -741,13 +741,13 @@ if [[ ${#files2tar[@]} -gt 0 ]]; then
   td="$tempdir/_tarball"
   mkdir "$td"
   for f in "${files2tar[@]}"; do
-    if (( paths )) && [[ ${f%%/*} != '..' ]]; then
+    if (( paths )) && [[ $f =~ [/] ]] && [[ "${f%%/*}" != '..' ]]; then
       par="$td/${f%/*}"
       mkdir -p "$par"
-      cp -r "$f" "$par"/
+      cp -Lr "$f" "$par"/
       unset -v par
     else
-      cp -r "$f" "$td"/
+      cp -Lr "$f" "$td"/
     fi
   done
   unset -v f
